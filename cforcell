@@ -1,0 +1,165 @@
+#!/usr/bin/env runhaskell
+{-# LANGUAGE UnicodeSyntax #-}
+{-# LANGUAGE LambdaCase    #-}
+
+import Control.Exception
+import Control.Monad
+import Control.Monad.Unicode
+import Data.Either
+import Data.Function
+import Data.List
+import Prelude.Unicode
+import Network.Curl.Download
+import System.Directory
+import System.Environment
+import System.Exit
+import System.FilePath
+import System.IO
+import System.Process
+import Text.Printf
+import Text.Read
+import Text.HTML.TagSoup
+import Text.HTML.TagSoup.Match
+import Text.HTML.TagSoup.Tree
+
+kTemplate    = "T.hs"     ∷ FilePath
+kCfDirPrefix = "cforces_" ∷ FilePath
+kConfig      = ".cforces" ∷ FilePath
+
+data Test = Test String String
+type Action = String
+
+getCfURI ∷ ℤ → FilePath
+getCfURI cfID = "http://codeforces.com/contest/" ⧺ show cfID
+getCfProblem cfID p = getCfURI cfID ⧺ "/problem/" ⧺ [p]
+
+main ∷ IO ()
+main = getArgs
+       ≫= \case
+            []     → return ("help",             [])
+            (a:as) → return (dropWhile (≡'-') a, as)
+       ≫= uncurry action
+
+action ∷ Action → [String] → IO ()
+action "init" args
+  | args ≡ []   = fail "\n\tMissing CodeForces contest ID\n"
+  | otherwise   =
+    do
+      cfID ← case readMaybe $ head args ∷ Maybe ℤ of
+                Nothing → fail $ "\n\tCodeForces ID must be Integer. Given: "
+                                 ⧺ (show ∘ head) args ⧺ "\n"
+                Just x  → return x
+      writeFile kConfig $ show cfID
+      putStrLn $ "Preparing files for ID " ⧺ show cfID ⧺ "\n"
+      prepareDirectory cfID
+      putStrLn "Init Completed"
+
+action "get" args
+  | args ≡ []   = fail "\n\tMissing problem name\n"
+  | otherwise   =
+    do
+      cfID ← getCfID
+      let prob = head $ head args
+
+      copyFile kTemplate
+        $ kCfDirPrefix ⧺ show cfID </> [prob] <.> "hs"
+
+      x ← openAsTags $ getCfProblem cfID prob ∷ IO (Either String [Tag String])
+      cont ← case x of
+                Left e  → fail $"\n\tCould not get contents\n\t" ⧺ show e ⧺ "\n"
+                Right x → return x
+      let r = zip [(0::Int)..] $ parseTests cont
+      forM_ r $ \(i, (ils, ols)) →
+        do
+          writeFile (kCfDirPrefix ⧺ show cfID </> printf "%c_%d.in"  prob i) ils
+          writeFile (kCfDirPrefix ⧺ show cfID </> printf "%c_%d.out" prob i) ols
+      putStrLn $ "Getting " ⧺ show cfID ⧺ "-" ⧺ [prob] ⧺ " completed"
+
+action "test" args
+  | args ≡ []   = fail "\n\tMissing problem name\n"
+  | otherwise   =
+    do
+      cfID ← getCfID
+      let prob = head $ head args
+      test prob cfID 0
+
+  where test ∷ Char → ℤ → Int → IO ()
+        test p cfID i  = let
+                        dir     = kCfDirPrefix ⧺ show cfID
+                        fileIn  = dir </> printf "%c_%d.in"  p i ∷ FilePath
+                        fileOut = dir </> printf "%c_%d.out" p i ∷ FilePath
+                     in do
+                        e ← doesFileExist fileIn
+                        when e $ do
+                          input ← readFile fileIn
+                          tOut ← readProcess "runhaskell" [
+                                      dir </> [p] <.> "hs"
+                                    ] input
+                          out ← readFile fileOut
+                          if ((≡) `on` lines) tOut out
+                            then putStrLn $ "Test " ⧺ show i ⧺ " OK"
+                            else putStrLn $ unlines ["Test " ⧺ show i ⧺ " WA"
+                                                    , replicate 40 '-'
+                                                    , tOut
+                                                    , replicate 40 '-'
+                                                    , out
+                                                    ]
+                          test p cfID (i+1)
+
+
+action "help" _ = putStr ∘ unlines $
+      [ "Usage: ./cforces action [action args]"
+      , ""
+      , "\t[--]help              print this PRETTY help"
+      , "\t[--]init contestID    init directory with 'contestID'"
+      , "\t[--]get  problemChar  download 'problemChar' problem tests"
+      , "\t[--]test problemChar  test 'problemChar' on samples"
+      ]
+
+action name _ = do
+  putStrLn $ "Error: called with wrong action " ⧺ show name
+  action "help" []
+
+getCfID ∷ IO ℤ
+getCfID = readFile kConfig ≫= return∘read ≫= return
+
+prepareDirectory ∷ ℤ → IO FilePath
+prepareDirectory cfID =
+  do
+    let dir = kCfDirPrefix ⧺ show cfID
+    createDirectoryIfMissing True $ dir
+    return dir
+
+parseTests ∷ [Tag String] → [(String,String)]
+parseTests ts = filterInpOutp $ extractText $ fst $ tagInsideParse sample ts
+  where
+    sample = tagOpenAttrLit "div" ("class", "sample-test") ∷ Tag String → Bool
+    filterInpOutp [] = []
+    filterInpOutp ("Input":xs) = let
+        (ils, "Output":rest) = break (≡"Output") xs
+        (ols, rest') = break (≡"Input") rest
+      in ((,) `on` unlines) ils ols : filterInpOutp rest'
+
+tagInsideParse ∷ Eq str ⇒ (Tag str → Bool) → [Tag str] → ([Tag str], [Tag str])
+tagInsideParse tagInd ts = case dropWhile (not∘tagInd) ts of
+                                [] → ([],[])
+                                ts → takeTagClose $ tail ts
+
+takeTagClose ∷ Eq str ⇒ [Tag str] → ([Tag str], [Tag str])
+takeTagClose = takeTagClose' 0
+  where
+    takeTagClose' 0 []              = ([], [])
+    takeTagClose' 0 (TagClose _:rs) = ([], rs)
+    takeTagClose' n (t:ts)          = (t:ts', rs)
+      where
+        n' = case t of
+              TagClose _ → n-1
+              TagOpen {} → n+1
+              TagText {} → n
+        (ts', rs) = takeTagClose' n' ts
+
+extractText ∷ Eq str ⇒ [Tag str] → [str]
+extractText ts = foldr folder [] ts
+  where
+    folder (TagText text) ts = text : ts
+    folder _ ts = ts
