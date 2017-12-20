@@ -1,0 +1,2 @@
+# cforcell
+Haskell codeforces parser
