@@ -77,14 +77,9 @@ action "get" args
 
 action "test" args
   | args ≡ []   = fail "\n\tMissing problem name\n"
-  | otherwise   =
-    do
-      cfID ← getCfID
-      let prob = head $ head args
-      test prob cfID 0
-
-  where test ∷ Char → ℤ → Int → IO ()
-        test p cfID i  = let
+  | otherwise   = getCfID ≫= test 0 (head $ head args) 
+  where test ∷ Int → Char → ℤ → IO ()
+        test i p cfID = let
                         dir     = kCfDirPrefix ⧺ show cfID
                         fileIn  = dir </> printf "%c_%d.in"  p i ∷ FilePath
                         fileOut = dir </> printf "%c_%d.out" p i ∷ FilePath
@@ -104,7 +99,7 @@ action "test" args
                                                     , replicate 40 '-'
                                                     , out
                                                     ]
-                          test p cfID (i+1)
+                          test (i+1) p cfID
 
 
 action "help" _ = putStr ∘ unlines $
